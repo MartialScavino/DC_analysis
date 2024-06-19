@@ -1,0 +1,466 @@
+---
+title: "scDiffCom"
+author: "M. SCAVINO"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/Users/mscavino/Thèse/ITMO/")
+
+library(Seurat)
+library(anndata)
+library(scDiffCom)
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(gdata) # Pour la fonction startswith
+library(DT)
+```
+
+
+```{r echo=FALSE}
+data <- read_h5ad("data/adata_liana.h5ad")
+seu <- CreateSeuratObject(counts = t(data$X), meta.data = data$obs)
+
+tab <- read.csv('data/adata_epi_metadata.csv', header = T, row.names = 1)
+cells = rownames(tab)
+
+
+seu$Stage <- as.vector(seu$Stage)
+seu$Population <- as.vector(seu$Population)
+
+
+x = rownames(seu@meta.data)
+liste_pop <- ifelse(seu@meta.data[x, "Population"] %in% c("Normal_Epith_Cells", "Pre-neoplastic_cells", "Tumor_cells"), "EpithelialCell", seu@meta.data[x, "Population"])
+liste_stage <- ifelse(seu@meta.data[x, "Population"] %in% c("Normal_Epith_Cells", "Pre-neoplastic_cells", "Tumor_cells"), tab[x, "Stage"], seu@meta.data[x, "Stage"])
+
+
+seu[["PopDiff"]] <- liste_pop
+seu[["StageDiff"]] <- liste_stage
+seu$StageDiff[which(seu$StageDiff == "Early_Stages")] <- "EarlyStages"
+```
+
+
+```{r pressure, echo=FALSE}
+# Retirer prolif et prendre que HES
+liste_prolif <- ifelse(startsWith(seu@meta.data[x, "PopDiff"], "Prolif"), TRUE, FALSE)
+
+seu$is_prolif <- liste_prolif
+```
+
+Stratégie
+
+```{r}
+dico = list(
+  CD8 = "T CD8",
+  CD4 = "T CD4",
+  Treg = "Treg",
+  Mo_Mac = "Mo Mac",
+  cDC2 = "cDC2",
+  Fibroblast = "Fibroblast",
+  Tgd = "Innate lymphocytes",
+  NK_cells = "Innate lymphocytes",
+  cDC1 = "cDC1",
+  Basophils = "Basophils",
+  B_cells = "B cells",
+  Plasma_cells = "B cells",
+  Neutrophils = "Neutrophils",
+  Endothelial_cells = "Endothelial cells",
+  ILC2 = "Innate lymphocytes",
+  pDC = "pDC",
+  ILC1 = "Innate lymphocytes",
+  NK_NK1.1_gd = "Innate lymphocytes",
+  Th17 = "T CD4",
+  EpithelialCell = "Epithelial cells",
+  Luminal_cells = "Epithelial cells",
+  Mature_DC = "Mature DC",
+  NKT = "Innate lymphocytes",
+  Basal_cells = "Epithelial cells",
+  Langerhans_cells = "cDC2"
+)
+```
+
+
+# Résultats {.tabset}
+
+
+## Early_Stages vs Healthy
+```{r echo=FALSE}
+
+seu.HES <- subset(seu, is_prolif == FALSE  & Stage %in% c("Healthy", "Early_Stages"))
+
+unique(seu.HES$PopDiff)
+
+annotation <- sapply(seu.HES$PopDiff, function(i){
+  return(dico[[i]])
+})
+
+seu.HES$annotation <- annotation
+
+
+seu.HES <- NormalizeData(seu.HES)
+seu.HES <- FindVariableFeatures(seu.HES)
+
+seu.HES@assays$RNA@data@x[is.na(seu.HES@assays$RNA@data@x)] <- 0
+
+seu.HES <- ScaleData(seu.HES)
+
+
+scdiffcom_object <- run_interaction_analysis(iterations = 300,
+  seurat_object = seu.HES,
+  LRI_species = "mouse",
+  seurat_celltype_id = "annotation",
+  seurat_condition_id = list(
+    column_name = "StageDiff",
+    cond1_name = "EarlyStages",
+    cond2_name = "Healthy"
+  )
+)
+```
+
+
+
+```{r}
+CCI_detected <- GetTableCCI(scdiffcom_object, type = "detected", simplified = TRUE)
+table(CCI_detected$REGULATION)
+
+
+ORA_results <- GetTableORA(scdiffcom_object, categories = "all", simplified = TRUE)
+names(ORA_results)
+
+
+ggplot(
+  CCI_detected,
+  aes(
+    x = LOGFC,
+    y = -log10(BH_P_VALUE_DE + 1E-2),
+    colour = REGULATION
+  )
+) + geom_point(
+) + scale_colour_manual(
+  values = c("UP" = "red", "DOWN" = "blue", "FLAT" = "green", "NSC" = "grey")
+) + xlab(
+  "log(FC)"
+) + ylab(
+  "-log10(Adj. p-value)"
+)
+
+
+
+PlotORA(
+  object = scdiffcom_object,
+category = "LRI",
+  regulation = "UP"
+) + theme(
+  legend.position = c(0.85, 0.4),
+  legend.key.size = unit(0.4, "cm")
+)
+
+
+if (!require("visNetwork")) install.packages("visNetwork")
+if (!require("igraph")) install.packages("igraph")
+if (!require("kableExtra")) install.packages("kableExtra")
+if (!require("RColorBrewer")) install.packages("RColorBrewer")
+
+
+BuildNetwork(
+  object = scdiffcom_object,layout_type = "conventional" 
+)
+
+
+
+
+scdiffcom_object@cci_table_detected %>% 
+  select(LRI, EMITTER_CELLTYPE, RECEIVER_CELLTYPE, LOGFC, P_VALUE_DE, REGULATION) %>% 
+  filter(P_VALUE_DE < 0.01, RECEIVER_CELLTYPE == "Epithelial cells", REGULATION != "NSC") %>% 
+  arrange(-LOGFC) %>% 
+  head(20)
+
+names(scdiffcom_object@cci_table_detected)
+
+LRI_HES <- scdiffcom_object@cci_table_detected %>% 
+  select(LRI, EMITTER_CELLTYPE, RECEIVER_CELLTYPE, LOGFC, P_VALUE_DE, REGULATION) %>% 
+  filter(REGULATION != "NSC", P_VALUE_DE < 0.01) %>% 
+  arrange(-LOGFC)
+
+datatable(LRI_HES)
+```
+
+
+
+## Tumor vs Healthy
+
+```{r echo=FALSE}
+seu.HT <- subset(seu, is_prolif == FALSE  & Stage %in% c("Healthy", "Tumor"))
+
+unique(seu.HT$PopDiff)
+
+dico = list(
+  CD8 = "T CD8",
+  CD4 = "T CD4",
+  Treg = "Treg",
+  Mo_Mac = "Mo Mac",
+  cDC2 = "cDC2",
+  Fibroblast = "Fibroblast",
+  Tgd = "Innate lymphocytes",
+  NK_cells = "Innate lymphocytes",
+  cDC1 = "cDC1",
+  Basophils = "Basophils",
+  B_cells = "B cells",
+  Plasma_cells = "B cells",
+  Neutrophils = "Neutrophils",
+  Endothelial_cells = "Endothelial cells",
+  ILC2 = "Innate lymphocytes",
+  pDC = "pDC",
+  ILC1 = "Innate lymphocytes",
+  NK_NK1.1_gd = "Innate lymphocytes",
+  Th17 = "T CD4",
+  EpithelialCell = "Epithelial cells",
+  Luminal_cells = "Epithelial cells",
+  Mature_DC = "Mature DC",
+  NKT = "Innate lymphocytes",
+  Basal_cells = "Epithelial cells",
+  Langerhans_cells = "cDC2"
+)
+
+
+annotation <- sapply(seu.HT$PopDiff, function(i){
+  return(dico[[i]])
+})
+
+seu.HT$annotation <- annotation
+
+
+
+seu.HT <- NormalizeData(seu.HT)
+seu.HT <- FindVariableFeatures(seu.HT)
+
+seu.HT@assays$RNA@data@x[is.na(seu.HT@assays$RNA@data@x)] <- 0
+
+seu.HT <- ScaleData(seu.HT)
+
+
+seu.HT@meta.data[which(seu.HT$StageDiff == "EarlyStages"), "StageDiff"] <- "Healthy"
+
+
+
+
+scdiffcom_object <- run_interaction_analysis(iterations = 300,
+                                             seurat_object = seu.HT,
+                                             LRI_species = "mouse",
+                                             seurat_celltype_id = "annotation",
+                                             seurat_condition_id = list(
+                                               column_name = "StageDiff",
+                                               cond1_name = "Tumor",
+                                               cond2_name = "Healthy"
+                                             )
+)
+
+
+```
+
+
+
+```{r}
+CCI_detected <- GetTableCCI(scdiffcom_object, type = "detected", simplified = TRUE)
+table(CCI_detected$REGULATION)
+
+
+ORA_results <- GetTableORA(scdiffcom_object, categories = "all", simplified = TRUE)
+names(ORA_results)
+
+
+ggplot(
+  CCI_detected,
+  aes(
+    x = LOGFC,
+    y = -log10(BH_P_VALUE_DE + 1E-2),
+    colour = REGULATION
+  )
+) + geom_point(
+) + scale_colour_manual(
+  values = c("UP" = "red", "DOWN" = "blue", "FLAT" = "green", "NSC" = "grey")
+) + xlab(
+  "log(FC)"
+) + ylab(
+  "-log10(Adj. p-value)"
+)
+
+
+
+PlotORA(
+  object = scdiffcom_object,
+  category = "LRI",
+  regulation = "UP"
+) + theme(
+  legend.position = c(0.85, 0.4),
+  legend.key.size = unit(0.4, "cm")
+)
+
+
+if (!require("visNetwork")) install.packages("visNetwork")
+if (!require("igraph")) install.packages("igraph")
+if (!require("kableExtra")) install.packages("kableExtra")
+if (!require("RColorBrewer")) install.packages("RColorBrewer")
+
+
+BuildNetwork(
+  object = scdiffcom_object,layout_type = "conventional" 
+)
+
+
+
+
+scdiffcom_object@cci_table_detected %>% 
+  select(LRI, EMITTER_CELLTYPE, RECEIVER_CELLTYPE, LOGFC, P_VALUE_DE, REGULATION) %>% 
+  filter(P_VALUE_DE < 0.05, RECEIVER_CELLTYPE == "Treg", EMITTER_CELLTYPE == "cDC2", REGULATION != "NSC") %>% 
+  arrange(-LOGFC)
+
+names(scdiffcom_object@cci_table_detected)
+
+LRI_HES <- scdiffcom_object@cci_table_detected %>% 
+  select(LRI, EMITTER_CELLTYPE, RECEIVER_CELLTYPE, LOGFC, P_VALUE_DE, REGULATION) %>% 
+  filter(REGULATION != "NSC", P_VALUE_DE < 0.01) %>% 
+  arrange(-LOGFC)
+
+datatable(LRI_HES)
+
+```
+
+
+## Tumor vs Early_Stages
+```{r echo=FALSE}
+seu.EST <- subset(seu, is_prolif == FALSE  & Stage %in% c("Early_Stages", "Tumor"))
+
+dico = list(
+  CD8 = "T CD8",
+  CD4 = "T CD4",
+  Treg = "Treg",
+  Mo_Mac = "Mo Mac",
+  cDC2 = "cDC2",
+  Fibroblast = "Fibroblast",
+  Tgd = "Innate lymphocytes",
+  NK_cells = "Innate lymphocytes",
+  cDC1 = "cDC1",
+  Basophils = "Basophils",
+  B_cells = "B cells",
+  Plasma_cells = "B cells",
+  Neutrophils = "Neutrophils",
+  Endothelial_cells = "Endothelial cells",
+  ILC2 = "Innate lymphocytes",
+  pDC = "pDC",
+  ILC1 = "Innate lymphocytes",
+  NK_NK1.1_gd = "Innate lymphocytes",
+  Th17 = "T CD4",
+  EpithelialCell = "Epithelial cells",
+  Luminal_cells = "Epithelial cells",
+  Mature_DC = "Mature DC",
+  NKT = "Innate lymphocytes",
+  Basal_cells = "Epithelial cells",
+  Langerhans_cells = "cDC2"
+)
+
+
+annotation <- sapply(seu.EST$PopDiff, function(i){
+  return(dico[[i]])
+})
+
+seu.EST$annotation <- annotation
+
+
+
+seu.EST <- NormalizeData(seu.EST)
+seu.EST <- FindVariableFeatures(seu.EST)
+
+seu.EST@assays$RNA@data@x[is.na(seu.EST@assays$RNA@data@x)] <- 0
+
+seu.EST <- ScaleData(seu.EST)
+
+seu.EST@meta.data[which(seu.EST$StageDiff == "Healthy"), "StageDiff"] <- "EarlyStages"
+
+scdiffcom_object <- run_interaction_analysis(iterations = 300,
+                                             seurat_object = seu.EST,
+                                             LRI_species = "mouse",
+                                             seurat_celltype_id = "annotation",
+                                             seurat_condition_id = list(
+                                               column_name = "StageDiff",
+                                               cond1_name = "Tumor",
+                                               cond2_name = "EarlyStages"
+                                             )
+)
+```
+
+
+
+```{r}
+CCI_detected <- GetTableCCI(scdiffcom_object, type = "detected", simplified = TRUE)
+table(CCI_detected$REGULATION)
+
+
+ORA_results <- GetTableORA(scdiffcom_object, categories = "all", simplified = TRUE)
+names(ORA_results)
+
+
+ggplot(
+  CCI_detected,
+  aes(
+    x = LOGFC,
+    y = -log10(BH_P_VALUE_DE + 1E-2),
+    colour = REGULATION
+  )
+) + geom_point(
+) + scale_colour_manual(
+  values = c("UP" = "red", "DOWN" = "blue", "FLAT" = "green", "NSC" = "grey")
+) + xlab(
+  "log(FC)"
+) + ylab(
+  "-log10(Adj. p-value)"
+)
+
+
+
+PlotORA(
+  object = scdiffcom_object,
+  category = "LRI",
+  regulation = "UP"
+) + theme(
+  legend.position = c(0.85, 0.4),
+  legend.key.size = unit(0.4, "cm")
+)
+
+
+if (!require("visNetwork")) install.packages("visNetwork")
+if (!require("igraph")) install.packages("igraph")
+if (!require("kableExtra")) install.packages("kableExtra")
+if (!require("RColorBrewer")) install.packages("RColorBrewer")
+
+
+BuildNetwork(
+  object = scdiffcom_object,layout_type = "conventional" 
+)
+
+
+
+
+scdiffcom_object@cci_table_detected %>% 
+  select(LRI, EMITTER_CELLTYPE, RECEIVER_CELLTYPE, LOGFC, P_VALUE_DE, REGULATION) %>% 
+  filter(P_VALUE_DE < 0.05, RECEIVER_CELLTYPE == "Treg", EMITTER_CELLTYPE == "cDC2", REGULATION != "NSC") %>% 
+  arrange(-LOGFC)
+
+names(scdiffcom_object@cci_table_detected)
+
+LRI_HES <- scdiffcom_object@cci_table_detected %>% 
+  select(LRI, EMITTER_CELLTYPE, RECEIVER_CELLTYPE, LOGFC, P_VALUE_DE, REGULATION) %>% 
+  filter(REGULATION != "NSC", P_VALUE_DE < 0.01) %>% 
+  arrange(-LOGFC)
+
+datatable(LRI_HES)
+```
+
