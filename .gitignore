@@ -1,0 +1,10 @@
+data/
+outs/
+scripts/*.html
+scripts/pyslingshot/*
+scripts/.ipynb_checkpoints/*
+scripts/__pycache__/*
+scripts/Spatial/*
+scripts/cache/*
+.RData
+.Rhistory
