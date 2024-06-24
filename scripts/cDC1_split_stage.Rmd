@@ -1,0 +1,1116 @@
+---
+title: "cDC1 stage split"
+author: "M. SCAVINO"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/Users/mscavino/Thèse/ITMO/")
+
+library(SCP)
+library(Seurat)
+library(dplyr)
+library(gprofiler2)
+library(harmony)
+library(ggplot2)
+library(UCell)
+library(presto)
+library(msigdbr)
+library(DT)
+library(enrichR)
+```
+
+```{r echo=FALSE}
+setwd("/Users/mscavino/Thèse/ITMO/")
+set.seed(123)
+
+seu <- readRDS("data/MERGED_SEU_REANOTATE_V3.RDS")
+
+
+seu$Stage <- factor(seu$Stage, levels = c("Healthy", "Early_Stages", "Tumor"))
+
+
+Stage_colors = list(Healthy = "dodgerblue", Early_Stages = "darkorange", Tumor = "tomato2")
+```
+
+
+
+# Tumor DC
+```{r}
+DCtum <- subset(seu, Population %in% c("cDC1", "cDC2", "Mature_DC") & Stage == 'Tumor')
+
+
+DCtum <- NormalizeData(DCtum)
+DCtum <- FindVariableFeatures(DCtum)
+DCtum <- ScaleData(DCtum)
+DCtum <- RunPCA(DCtum)
+ElbowPlot(DCtum, ndims = 50)
+
+
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+mmus_s = gorth(cc.genes.updated.2019$s.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+mmus_g2m = gorth(cc.genes.updated.2019$g2m.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+
+DCtum <- CellCycleScoring(DCtum, s.features = mmus_s, g2m.features = mmus_g2m)
+
+CellDimPlot(srt = DCtum, group.by = "Population",
+            reduction = "PCA", theme_use = "theme_blank")
+
+CellDimPlot(srt = DCtum, group.by = "Stage",
+            reduction = "PCA", theme_use = "theme_blank")
+
+CellDimPlot(srt = DCtum, group.by = "Phase",
+            reduction = "PCA", theme_use = "theme_blank")
+
+CellDimPlot(srt = DCtum, group.by = "orig.ident",
+            reduction = "PCA", theme_use = "theme_blank")
+```
+
+
+
+Integration avec harmony
+
+
+```{r}
+DCtum <- RunHarmony(DCtum, "orig.ident")
+DCtum <- FindNeighbors(DCtum, dims = 1:10, reduction = "harmony")
+DCtum <- RunUMAP(DCtum, dims = 1:10, reduction = "harmony")
+DCtum <- FindClusters(DCtum, resolution = 0.4)
+
+CellDimPlot(srt = DCtum, group.by = "Population",
+            reduction = "UMAP", theme_use = "theme_blank")
+CellDimPlot(srt = DCtum, group.by = "Phase",
+            reduction = "UMAP", theme_use = "theme_blank")
+CellDimPlot(srt = DCtum, group.by = "orig.ident",
+            reduction = "UMAP", theme_use = "theme_blank")
+CellDimPlot(srt = DCtum, group.by = "seurat_clusters",
+            reduction = "UMAP", theme_use = "theme_blank")
+```
+
+
+
+# Marker genes 
+
+> presto wilcoxauc logFC > 0.58 & padj < 0.05 & pct.in > 0.1
+
+```{r}
+markers <- wilcoxauc(DCtum, group_by = "seurat_clusters")
+
+markers_filter <- markers %>%  filter(padj < 0.05 & logFC > 0.58 & pct_in > 0.1)
+```
+
+Show top 10 by cluster
+
+```{r}
+top10 <- markers_filter %>% 
+  group_by(group) %>% 
+  slice_max(order_by = logFC, n = 10)
+datatable(top10)
+```
+
+
+```{r fig.width=20, fig.height=10}
+ht <- GroupHeatmap(
+  srt = DCtum,
+  top10$feature,
+  group.by = c("seurat_clusters"),
+  heatmap_palette = "RdBu",
+  group_palcolor = list(seurat_clusters = NULL, Stage = Stage_colors),
+  show_column_names = TRUE, add_dot = TRUE, add_reticle = TRUE, flip = T, column_names_rot = 45,
+)
+ht$plot
+```
+
+## Focus on cDC1 clusters {.tabset}
+
+### Cluster 0
+```{r fig.width=25, fig.height=10}
+enrich_genes <- markers_filter %>% filter(group == 0)
+enrich_genes <- enrich_genes$feature
+
+database = "Reactome_2022"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test$Reactome_2022 %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+
+```{r fig.width=25, fig.height=10}
+database = "GO_Biological_Process_2023"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test[[database]] %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+
+### Cluster 4
+```{r fig.width=25, fig.height=10}
+enrich_genes <- markers_filter %>% filter(group == 4)
+enrich_genes <- enrich_genes$feature
+
+database = "Reactome_2022"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test$Reactome_2022 %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+
+
+```{r fig.width=25, fig.height=10}
+database = "GO_Biological_Process_2023"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test[[database]] %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+### Cluster 9
+```{r fig.width=25, fig.height=10}
+enrich_genes <- markers_filter %>% filter(group == 9)
+enrich_genes <- enrich_genes$feature
+
+database = "Reactome_2022"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test$Reactome_2022 %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+```{r fig.width=25, fig.height=10}
+database = "GO_Biological_Process_2023"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test[[database]] %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+### Cluster 4 vs 0
+```{r fig.width=25, fig.height=10}
+t <- FindMarkers(DCtum, ident.1 = "4", ident.2 = 0, min.pct = 0.1)
+enrich_genes <- rownames(t %>% 
+  filter(p_val_adj < 0.05 & avg_log2FC > 0.58) %>% 
+  arrange(-avg_log2FC))
+
+database = "Reactome_2022"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test$Reactome_2022 %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+```{r fig.width=25, fig.height=10}
+database = "GO_Biological_Process_2023"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test[[database]] %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+### Selected pathways
+```{r}
+GO_BP<-msigdbr(species = "Mus musculus", subcategory = "GO:BP")
+
+
+GO_BP<-select(GO_BP,gs_name,gene_symbol,gs_exact_source)
+
+
+print(GO_BP[grep("MOTILITY", GO_BP$gs_name),], n = 800)
+
+
+selected_pathways<-c("GO:0019882","GO:0002468", "GO:0002407","GO:0097028", 'GO:0002371', "GO:0016477", "GO:0042590")
+
+
+GO_BP_Filter<-filter(GO_BP,gs_exact_source%in%selected_pathways)
+
+GO_BP_list<-split(GO_BP_Filter$gene_symbol,GO_BP_Filter$gs_name)
+
+DCtum <- AddModuleScore_UCell(DCtum, features = GO_BP_list,name = '')
+
+DotPlot(DCtum, features = names(GO_BP_list), group.by = "seurat_clusters", cols = "RdBu") + coord_flip()
+```
+
+
+
+On observe 3 populations de cDC1 dans la tumeur. Ce serait intéressant de voir si on les retrouve dans les autres stades.
+
+
+# Healthy DC
+```{r}
+DChealthy <- subset(seu, Population %in% c("cDC1", "cDC2", "Mature_DC") & Stage == 'Healthy')
+
+
+DChealthy <- NormalizeData(DChealthy)
+DChealthy <- FindVariableFeatures(DChealthy)
+DChealthy <- ScaleData(DChealthy)
+DChealthy <- RunPCA(DChealthy)
+ElbowPlot(DChealthy, ndims = 50)
+
+
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+mmus_s = gorth(cc.genes.updated.2019$s.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+mmus_g2m = gorth(cc.genes.updated.2019$g2m.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+
+DChealthy <- CellCycleScoring(DChealthy, s.features = mmus_s, g2m.features = mmus_g2m)
+
+CellDimPlot(srt = DChealthy, group.by = "Population",
+            reduction = "PCA", theme_use = "theme_blank")
+
+CellDimPlot(srt = DChealthy, group.by = "Stage",
+            reduction = "PCA", theme_use = "theme_blank")
+
+CellDimPlot(srt = DChealthy, group.by = "Phase",
+            reduction = "PCA", theme_use = "theme_blank")
+
+CellDimPlot(srt = DChealthy, group.by = "orig.ident",
+            reduction = "PCA", theme_use = "theme_blank")
+```
+
+
+Integration avec harmony
+
+
+```{r}
+DChealthy <- RunHarmony(DChealthy, "orig.ident")
+DChealthy <- FindNeighbors(DChealthy, dims = 1:10, reduction = "harmony")
+DChealthy <- RunUMAP(DChealthy, dims = 1:10, reduction = "harmony")
+DChealthy <- FindClusters(DChealthy, resolution = 0.4)
+
+CellDimPlot(srt = DChealthy, group.by = "Population",
+            reduction = "UMAP", theme_use = "theme_blank")
+CellDimPlot(srt = DChealthy, group.by = "Phase",
+            reduction = "UMAP", theme_use = "theme_blank")
+CellDimPlot(srt = DChealthy, group.by = "orig.ident",
+            reduction = "UMAP", theme_use = "theme_blank")
+CellDimPlot(srt = DChealthy, group.by = "seurat_clusters",
+            reduction = "UMAP", theme_use = "theme_blank")
+```
+
+
+# Marker genes 
+
+> presto wilcoxauc logFC > 0.58 & padj < 0.05 & pct.in > 0.1
+
+```{r}
+markers <- wilcoxauc(DChealthy, group_by = "seurat_clusters")
+
+markers_filter <- markers %>%  filter(padj < 0.05 & logFC > 0.58 & pct_in > 0.1)
+```
+
+Show top 10 by cluster
+
+```{r}
+top10 <- markers_filter %>% 
+  group_by(group) %>% 
+  slice_max(order_by = logFC, n = 10)
+datatable(top10)
+```
+
+
+```{r fig.width=20, fig.height=10}
+ht <- GroupHeatmap(
+  srt = DChealthy,
+  top10$feature,
+  group.by = c("seurat_clusters"),
+  heatmap_palette = "RdBu",
+  group_palcolor = list(seurat_clusters = NULL, Stage = Stage_colors),
+  show_column_names = TRUE, add_dot = TRUE, add_reticle = TRUE, flip = T, column_names_rot = 45,
+)
+ht$plot
+```
+
+## Focus on cDC1 clusters {.tabset}
+
+### Cluster 0
+```{r fig.width=25, fig.height=10}
+enrich_genes <- markers_filter %>% filter(group == 0)
+enrich_genes <- enrich_genes$feature
+
+database = "Reactome_2022"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test$Reactome_2022 %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+```{r fig.width=25, fig.height=10}
+database = "GO_Biological_Process_2023"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test[[database]] %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+
+### Cluster 1
+```{r fig.width=25, fig.height=10}
+enrich_genes <- markers_filter %>% filter(group == 1)
+enrich_genes <- enrich_genes$feature
+
+database = "Reactome_2022"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test$Reactome_2022 %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+```{r fig.width=25, fig.height=10}
+database = "GO_Biological_Process_2023"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test[[database]] %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+### Cluster 3
+```{r fig.width=25, fig.height=10}
+enrich_genes <- markers_filter %>% filter(group == 3)
+enrich_genes <- enrich_genes$feature
+
+database = "Reactome_2022"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test$Reactome_2022 %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+```{r fig.width=25, fig.height=10}
+database = "GO_Biological_Process_2023"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test[[database]] %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+### Cluster 3 vs 0
+```{r fig.width=25, fig.height=10}
+t <- FindMarkers(DChealthy, ident.1 = 3, ident.2 = 0, min.pct = 0.1)
+enrich_genes <- rownames(t %>% 
+  filter(p_val_adj < 0.05 & avg_log2FC > 0.58) %>% 
+  arrange(-avg_log2FC))
+
+database = "Reactome_2022"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test$Reactome_2022 %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+```{r fig.width=25, fig.height=10}
+database = "GO_Biological_Process_2023"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test[[database]] %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+### Selected pathways
+```{r}
+DChealthy <- AddModuleScore_UCell(DChealthy, features = GO_BP_list,name = '')
+
+DotPlot(DChealthy, features = names(GO_BP_list), group.by = "seurat_clusters", cols = "RdBu") + coord_flip()
+```
+
+
+
+Cluster 3 Cell migration ?
+
+
+# Prénéo DC
+```{r}
+DCearly <- subset(seu, Population %in% c("cDC1", "cDC2", "Mature_DC") & Stage == 'Early_Stages')
+
+
+DCearly <- NormalizeData(DCearly)
+DCearly <- FindVariableFeatures(DCearly)
+DCearly <- ScaleData(DCearly)
+DCearly <- RunPCA(DCearly)
+ElbowPlot(DCearly, ndims = 50)
+
+
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+mmus_s = gorth(cc.genes.updated.2019$s.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+mmus_g2m = gorth(cc.genes.updated.2019$g2m.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+
+DCearly <- CellCycleScoring(DCearly, s.features = mmus_s, g2m.features = mmus_g2m)
+
+CellDimPlot(srt = DCearly, group.by = "Population",
+            reduction = "PCA", theme_use = "theme_blank")
+
+CellDimPlot(srt = DCearly, group.by = "Stage",
+            reduction = "PCA", theme_use = "theme_blank")
+
+CellDimPlot(srt = DCearly, group.by = "Phase",
+            reduction = "PCA", theme_use = "theme_blank")
+
+CellDimPlot(srt = DCearly, group.by = "orig.ident",
+            reduction = "PCA", theme_use = "theme_blank")
+```
+
+
+
+Integration avec harmony
+
+
+```{r}
+DCearly <- RunHarmony(DCearly, "orig.ident")
+DCearly <- FindNeighbors(DCearly, dims = 1:10, reduction = "harmony")
+DCearly <- RunUMAP(DCearly, dims = 1:10, reduction = "harmony")
+DCearly <- FindClusters(DCearly, resolution = 0.4)
+
+CellDimPlot(srt = DCearly, group.by = "Population",
+            reduction = "UMAP", theme_use = "theme_blank")
+CellDimPlot(srt = DCearly, group.by = "Phase",
+            reduction = "UMAP", theme_use = "theme_blank")
+CellDimPlot(srt = DCearly, group.by = "orig.ident",
+            reduction = "UMAP", theme_use = "theme_blank")
+CellDimPlot(srt = DCearly, group.by = "seurat_clusters",
+            reduction = "UMAP", theme_use = "theme_blank")
+```
+
+
+
+# Marker genes 
+
+> presto wilcoxauc logFC > 0.58 & padj < 0.05 & pct.in > 0.1
+
+```{r}
+markers <- wilcoxauc(DCearly, group_by = "seurat_clusters")
+
+markers_filter <- markers %>%  filter(padj < 0.05 & logFC > 0.58 & pct_in > 0.1)
+```
+
+Show top 10 by cluster
+
+```{r}
+top10 <- markers_filter %>% 
+  group_by(group) %>% 
+  slice_max(order_by = logFC, n = 10)
+datatable(top10)
+```
+
+
+```{r fig.width=20, fig.height=10}
+ht <- GroupHeatmap(
+  srt = DCearly,
+  top10$feature,
+  group.by = c("seurat_clusters"),
+  heatmap_palette = "RdBu",
+  group_palcolor = list(seurat_clusters = NULL, Stage = Stage_colors),
+  show_column_names = TRUE, add_dot = TRUE, add_reticle = TRUE, flip = T, column_names_rot = 45,
+)
+ht$plot
+```
+
+## Focus on cDC1 clusters {.tabset}
+
+### Cluster 0
+```{r fig.width=25, fig.height=10}
+enrich_genes <- markers_filter %>% filter(group == 0)
+enrich_genes <- enrich_genes$feature
+
+database = "Reactome_2022"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test[[database]] %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+
+```{r fig.width=25, fig.height=10}
+database = "GO_Biological_Process_2023"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test[[database]] %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+
+### Cluster 4
+```{r fig.width=25, fig.height=10}
+enrich_genes <- markers_filter %>% filter(group == 4)
+enrich_genes <- enrich_genes$feature
+
+database = "Reactome_2022"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test$Reactome_2022 %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+
+```{r fig.width=25, fig.height=10}
+database = "GO_Biological_Process_2023"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test[[database]] %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+### Cluster 7
+```{r fig.width=25, fig.height=10}
+enrich_genes <- markers_filter %>% filter(group == 7)
+enrich_genes <- enrich_genes$feature
+
+database = "Reactome_2022"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test$Reactome_2022 %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+
+```{r fig.width=25, fig.height=10}
+database = "GO_Biological_Process_2023"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test[[database]] %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+### Cluster 4 vs 0
+```{r fig.width=25, fig.height=10}
+t <- FindMarkers(DChealthy, ident.1 = 4, ident.2 = 0, min.pct = 0.1)
+enrich_genes <- rownames(t %>% 
+  filter(p_val_adj < 0.05 & avg_log2FC > 0.58) %>% 
+  arrange(-avg_log2FC))
+
+database = "Reactome_2022"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test$Reactome_2022 %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+
+
+```{r fig.width=25, fig.height=10}
+database = "GO_Biological_Process_2023"
+
+test <- enrichr(enrich_genes, databases = database)
+temp <- unlist(strsplit(test[[database]]$Overlap, "/"))
+gene_ratio <- as.integer(temp[seq(1,length(temp),2)]) / as.integer(temp[seq(2,length(temp),2)])
+nb_genes <- as.integer(temp[seq(1,length(temp),2)])
+test[[database]]["gene_ratio"] <- gene_ratio
+test[[database]]["nbgenes"] <- nb_genes
+new_df <- test[[database]] %>% 
+  filter(Adjusted.P.value < 0.05) %>% 
+  arrange(-gene_ratio)
+
+new_df$Term <- factor(new_df$Term, levels = rev(new_df$Term))
+
+ggplot(new_df[1:30,], aes(x = gene_ratio, y = Term, color = Adjusted.P.value, size = nbgenes)) +
+  geom_point() + 
+  theme_light()
+```
+
+### Selected pathways
+```{r}
+DCearly <- AddModuleScore_UCell(DCearly, features = GO_BP_list,name = '')
+
+DotPlot(DCearly, features = names(GO_BP_list), group.by = "seurat_clusters", cols = "RdBu") + coord_flip()
+```
+
+# Signature comparison 
+
+## Interferon response cluster in tumor signature {.tabset}
+```{r}
+markers <- wilcoxauc(DCtum, group_by = "seurat_clusters")
+
+markers_filter <- markers %>%  filter(padj < 0.05 & logFC > 0.58 & pct_in > 0.1)
+
+enrich_genes <- markers_filter %>% filter(group == 9)
+enrich_genes <- enrich_genes$feature
+```
+
+
+
+### Tumor
+```{r}
+DCtum <- AddModuleScore_UCell(DCtum, features = list(interferon_response = enrich_genes))
+
+FeaturePlot(DCtum, features = "interferon_response_UCell",cols = c("black", "red"))
+VlnPlot(DCtum, features = "interferon_response_UCell", group.by = "seurat_clusters")
+```
+
+### Early
+```{r}
+DCearly <- AddModuleScore_UCell(DCearly, features = list(interferon_response = enrich_genes))
+
+FeaturePlot(DCearly, features = "interferon_response_UCell",cols = c("black", "red"))
+VlnPlot(DCearly, features = "interferon_response_UCell", group.by = "seurat_clusters")
+```
+
+### Healthy
+```{r}
+DChealthy <- AddModuleScore_UCell(DChealthy, features = list(interferon_response = enrich_genes))
+
+FeaturePlot(DChealthy, features = "interferon_response_UCell",cols = c("black", "red"))
+VlnPlot(DChealthy, features = "interferon_response_UCell", group.by = "seurat_clusters")
+```
+
+
+## Cluster 4 tumor vs cluster 0 tumor signature {.tabset}
+```{r}
+t <- FindMarkers(DCtum, ident.1 = "4", ident.2 = 0, min.pct = 0.1)
+enrich_genes <- rownames(t %>% 
+  filter(p_val_adj < 0.05 & avg_log2FC > 0.58) %>% 
+  arrange(-avg_log2FC))
+
+```
+
+### Tumor
+```{r}
+DCtum <- AddModuleScore_UCell(DCtum, features = list(signature_v40 = enrich_genes))
+
+FeaturePlot(DCtum, features = "signature_v40_UCell",cols = c("black", "red"))
+VlnPlot(DCtum, features = "signature_v40_UCell", group.by = "seurat_clusters")
+```
+
+### Early
+```{r}
+DCearly <- AddModuleScore_UCell(DCearly, features = list(signature_v40 = enrich_genes))
+
+FeaturePlot(DCearly, features = "signature_v40_UCell",cols = c("black", "red"))
+VlnPlot(DCearly, features = "signature_v40_UCell", group.by = "seurat_clusters")
+```
+
+### Healthy
+```{r}
+DChealthy <- AddModuleScore_UCell(DChealthy, features = list(signature_v40 = enrich_genes))
+
+FeaturePlot(DChealthy, features = "signature_v40_UCell",cols = c("black", "red"))
+VlnPlot(DChealthy, features = "signature_v40_UCell", group.by = "seurat_clusters")
+```
+
+
+```{r}
+FeaturePlot(DCearly, features = "Plcg2", cols = c("black", "red"))
+VlnPlot(DCearly, features = "Irf8", group.by = "seurat_clusters")
+```
+
+# All stages
+
+```{r}
+DC <- subset(seu, Population %in% c("cDC1", "cDC2", "Mature_DC", "Langerhans_cells"))
+
+DC <- NormalizeData(DC)
+DC <- FindVariableFeatures(DC)
+DC <- ScaleData(DC)
+DC <- RunPCA(DC)
+ElbowPlot(DC, ndims = 50)
+
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+mmus_s = gorth(cc.genes.updated.2019$s.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+mmus_g2m = gorth(cc.genes.updated.2019$g2m.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+
+DC <- CellCycleScoring(DC, s.features = mmus_s, g2m.features = mmus_g2m)
+
+CellDimPlot(srt = DC, group.by = "Population",
+            reduction = "PCA", theme_use = "theme_blank")
+
+CellDimPlot(srt = DC, group.by = "Stage",
+            reduction = "PCA", theme_use = "theme_blank")
+
+CellDimPlot(srt = DC, group.by = "Phase",
+            reduction = "PCA", theme_use = "theme_blank")
+
+DC <- FindNeighbors(DC, dims = 1:15)
+DC <- FindClusters(DC)
+DC <- RunUMAP(DC, dims = 1:15, n.neighbors = 10)
+
+CellDimPlot(srt = DC, group.by = "Population",
+            reduction = "UMAP", theme_use = "theme_blank")
+CellDimPlot(srt = DC, group.by = "Stage",
+            reduction = "UMAP", theme_use = "theme_blank", palcolor = Stage_colors)
+CellDimPlot(srt = DC, group.by = "Phase",
+            reduction = "UMAP", theme_use = "theme_blank")
+CellDimPlot(srt = DC, group.by = "orig.ident",
+            reduction = "UMAP", theme_use = "theme_blank")
+CellDimPlot(srt = DC, group.by = "seurat_clusters",
+            reduction = "UMAP", theme_use = "theme_blank", label = T)
+```
+
+
+
+```{r}
+t <- FindMarkers(DCtum, ident.1 = "4", ident.2 = 0, min.pct = 0.1)
+enrich_genes <- rownames(t %>% 
+  filter(p_val_adj < 0.05 & avg_log2FC > 0.58) %>% 
+  arrange(-avg_log2FC))
+
+DC <- AddModuleScore_UCell(DC, features = list(signature_v40 = enrich_genes))
+
+FeaturePlot(DC, features = "signature_v40_UCell",cols = c("black", "red"))
+VlnPlot(DC, features = "signature_v40_UCell", group.by = "seurat_clusters")
+
+
+markers <- wilcoxauc(DCtum, group_by = "seurat_clusters")
+
+markers_filter <- markers %>%  filter(padj < 0.05 & logFC > 0.58 & pct_in > 0.1)
+
+enrich_genes <- markers_filter %>% filter(group == 9)
+enrich_genes <- enrich_genes$feature
+
+DC <- AddModuleScore_UCell(DC, features = list(interferon_response = enrich_genes))
+
+FeaturePlot(DC, features = "interferon_response_UCell",cols = c("black", "red"))
+VlnPlot(DC, features = "interferon_response_UCell", group.by = "seurat_clusters")
+
+```
+
+Signature Cluster
+
+```{r}
+
+DC$test <- NA
+
+cells <- rownames(DCtum@meta.data[which(DCtum$seurat_clusters == 4),])
+DC@meta.data[cells, "test"] <- "Tum_4"
+
+cells <- rownames(DChealthy@meta.data[which(DChealthy$seurat_clusters == 3),])
+DC@meta.data[cells, "test"] <- "Healthy_3"
+
+cells <- rownames(DCearly@meta.data[which(DCearly$seurat_clusters == 4),])
+DC@meta.data[cells, "test"] <- "Early_4"
+
+
+### ISG
+cells <- rownames(DCtum@meta.data[which(DCtum$seurat_clusters == 9),])
+DC@meta.data[cells, "test"] <- "Tum_ISG"
+
+cells <- rownames(DCearly@meta.data[which(DCearly$seurat_clusters == 7),])
+DC@meta.data[cells, "test"] <- "Early_ISG"
+
+
+DimPlot(DC, group.by = "test")
+
+t <- FindMarkers(DC, group.by = "test", ident.1 = "Early_4", ident.2 = "Healthy_3", only.pos = T)
+datatable(t %>%  filter(p_val_adj < 0.05 & avg_log2FC > 0) %>% arrange(-avg_log2FC))
+
+df <- enrichr(rownames(t), databases = "GO_Biological_Process_2023")
+datatable(df$GO_Biological_Process_2023)
+```
+
+
+Signature ISG
+
+```{r}
+t <- FindMarkers(DC, group.by = "test", ident.1 = "Early_ISG", ident.2 = "Tum_ISG", only.pos = T)
+datatable(t %>%  filter(p_val_adj < 0.05 & avg_log2FC > 0) %>% arrange(-avg_log2FC))
+
+
+df <- enrichr(rownames(t), databases = "GO_Biological_Process_2023")
+datatable(df$GO_Biological_Process_2023)
+```
+
